@@ -45,7 +45,7 @@ def capture_historical_rates():
 
         # 'id' remains SERIAL (automatic), but we now provide the other 3 columns
         df.to_sql(
-            name="exchange1",
+            name="exchange_rates",
             con=engine,
             if_exists="append",
             index=False,
