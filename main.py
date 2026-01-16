@@ -1,26 +1,26 @@
 import requests
+import pandas as pd
+import sqlalchemy
 from dotenv import load_dotenv
 import os
 
 load_dotenv()
 
 API_URL = os.getenv("EXCHANGE_KEY")
+DATABASE_URL = os.getenv("SUPABASE_URL")
+
+engine = sqlalchemy.create_engine(DATABASE_URL)
 
 
-def get_data(data):
-    url = API_URL
-    response = requests.get(url)
+response = requests.get(API_URL)
+print(response)
 
-    if response.status_code == 200:
-        code_rate = response.json()
-        return code_rate
-    else:
-        print(f"failed to retrive data {response.status_code}")
+response_data = response.json()
+# print(response_data)
 
+rates_dict = response_data.get("conversion_rates", {})
+df = pd.Series(rates_dict).reset_index()
 
-parameter = "rates"
-result_data = get_data(parameter)
+# print(rates_dict)
 
-if result_data:
-    print(f"{result_data["conversion_rates"]}")
-    print(f"{result_data["time_last_update_utc"]}")
+df.to_sql(name="rates", con=engine, index=False, if_exists="fail")
