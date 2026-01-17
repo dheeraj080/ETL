@@ -3,7 +3,7 @@ name: Daily Exchange Sync
 on:
   schedule:
     # Runs at 00:00 UTC every day (roughly 5:30 AM IST)
-    - cron: '*/5 * * * *'
+    - cron: '0 1 * * *'
   workflow_dispatch: # Allows you to run it manually via the Actions tab
 
 jobs:
