@@ -1,4 +1,4 @@
-name: Daily Exchange Sync
+name: Daily crypto Sync
 
 on:
   schedule:
