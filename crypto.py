@@ -4,12 +4,30 @@ import pandas as pd
 import time
 from sqlalchemy import create_engine
 from dotenv import load_dotenv
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 
 # 1. Load configuration
 load_dotenv()
 API_URL = "https://api.coingecko.com/api/v3/coins/markets"
 API_KEY = os.getenv("GECKO_KEY")
+
 DB_URL = os.getenv("SUPABASE_URL")  # Ensure this is a full postgres:// string
+
+
+def get_robust_session():
+    session = requests.Session()
+    retry_strategy = Retry(
+        total=5,  # Max 5 retries
+        backoff_factor=2,  # Wait 2s, 4s, 8s, 16s... between retries
+        status_forcelist=[429, 500, 502, 503, 504],  # Retry on these errors
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("https://", adapter)
+    return session
+
+
+session = get_robust_session()
 
 
 def get_coins(pages=12):
@@ -25,14 +43,14 @@ def get_coins(pages=12):
             "sparkline": False,
         }
 
-        response = requests.get(API_URL, headers=headers, params=params)
+        response = session.get(API_URL, headers=headers, params=params)
         if response.status_code == 200:
             all_data.extend(response.json())
             print(f"Fetched page {page}...")
         else:
             print(f"Error: {response.status_code}")
             break
-        time.sleep(2.5)  # Crucial for free tier
+        time.sleep(3.1)  # Crucial for free tier
 
     df = pd.DataFrame(all_data)
 
