@@ -1,0 +1,30 @@
+name: Daily Exchange Sync
+
+on:
+  schedule:
+    # Runs at 00:00 UTC every day (roughly 5:30 AM IST)
+    - cron: '*/5 * * * *'
+  workflow_dispatch: # Allows you to run it manually via the Actions tab
+
+jobs:
+  run-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Execute Python Script
+        env:
+          # Pulls secrets from GitHub Settings into Environment Variables
+          EXCHANGE_KEY: ${{ secrets.EXCHANGE_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        run: python crypto.py
