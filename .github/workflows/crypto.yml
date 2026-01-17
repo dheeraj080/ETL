@@ -1,9 +1,9 @@
-name: crypto
+name: Daily crypto Sync
 
 on:
   schedule:
-    # Runs at 00:00 UTC every day (roughly 5:30 AM IST)
-    - cron: '0 1 * * *'
+    # Runs every 5 minutes
+    - cron: '*/5 * * * *'
   workflow_dispatch: # Allows you to run it manually via the Actions tab
 
 jobs:
@@ -25,6 +25,6 @@ jobs:
       - name: Execute Python Script
         env:
           # Pulls secrets from GitHub Settings into Environment Variables
-          EXCHANGE_KEY: ${{ secrets.EXCHANGE_KEY }}
+          EXCHANGE_KEY: ${{ secrets.GECKO_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
         run: python crypto.py
