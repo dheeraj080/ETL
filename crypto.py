@@ -30,7 +30,7 @@ def get_robust_session():
 session = get_robust_session()
 
 
-def get_coins(pages=12):
+def get_coins(pages=8):
     all_data = []
     headers = {"x-cg-demo-api-key": API_KEY}
 
@@ -83,7 +83,7 @@ def get_coins(pages=12):
 # --- EXECUTION FLOW ---
 
 # A. Get the data
-df_clean = get_coins(pages=12)
+df_clean = get_coins(pages=8)
 print(f"Total usable coins: {len(df_clean)}")
 
 # B. Upload to Database (Outside the function)
