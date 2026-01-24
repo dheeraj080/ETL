@@ -29,4 +29,4 @@ jobs:
         env:
           GECKO_KEY: ${{ secrets.GECKO_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-        run: python your_script_name.py
+        run: python crypto.py
