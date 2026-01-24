@@ -46,7 +46,7 @@ def capture_historical_rates():
     try:
         with engine.begin() as connection:  # Use a transaction block
             df.to_sql(
-                name="exchange_rates2",
+                name="exchange_rates",
                 con=connection,
                 if_exists="append",
                 index=False,
