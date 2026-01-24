@@ -1,26 +1,25 @@
 import os
 import requests
 import pandas as pd
-import time
 from sqlalchemy import create_engine
 from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
+from concurrent.futures import ThreadPoolExecutor
 
 # 1. Load configuration
 load_dotenv()
 API_URL = "https://api.coingecko.com/api/v3/coins/markets"
 API_KEY = os.getenv("GECKO_KEY")
-
-DB_URL = os.getenv("SUPABASE_URL")  # Ensure this is a full postgres:// string
+DB_URL = os.getenv("SUPABASE_URL")
 
 
 def get_robust_session():
     session = requests.Session()
     retry_strategy = Retry(
-        total=5,  # Max 5 retries
-        backoff_factor=2,  # Wait 2s, 4s, 8s, 16s... between retries
-        status_forcelist=[429, 500, 502, 503, 504],  # Retry on these errors
+        total=5,
+        backoff_factor=2,
+        status_forcelist=[429, 500, 502, 503, 504],
     )
     adapter = HTTPAdapter(max_retries=retry_strategy)
     session.mount("https://", adapter)
@@ -30,71 +29,79 @@ def get_robust_session():
 session = get_robust_session()
 
 
-def get_coins(pages=8):
-    all_data = []
+def fetch_page(page):
+    """Worker function for threading."""
+    params = {
+        "vs_currency": "usd",
+        "order": "market_cap_desc",
+        "per_page": 250,
+        "page": page,
+        "sparkline": False,
+    }
     headers = {"x-cg-demo-api-key": API_KEY}
-
-    for page in range(1, pages + 1):
-        params = {
-            "vs_currency": "usd",
-            "order": "market_cap_desc",
-            "per_page": 250,
-            "page": page,
-            "sparkline": False,
-        }
-
+    try:
         response = session.get(API_URL, headers=headers, params=params)
         if response.status_code == 200:
-            all_data.extend(response.json())
             print(f"Fetched page {page}...")
-        else:
-            print(f"Error: {response.status_code}")
-            break
-        time.sleep(3.1)  # Crucial for free tier
+            return response.json()
+    except Exception as e:
+        print(f"Error fetching page {page}: {e}")
+    return []
 
+
+def get_crypto_data(pages=8):
+    # --- A. Parallel Fetching ---
+    # Using threads allows us to wait for multiple network responses at once
+    with ThreadPoolExecutor(max_workers=pages) as executor:
+        results = list(executor.map(fetch_page, range(1, pages + 1)))
+
+    all_data = [item for sublist in results for item in sublist]
     df = pd.DataFrame(all_data)
 
-    # --- CLEANING ---
+    if df.empty:
+        return df
+
+    # --- B. Cleaning & Processing ---
     df = df.dropna(subset=["market_cap_rank"])
     df = df[df["total_volume"] > 50000]
 
     keep_columns = [
-        "id",  # Unique identifier (e.g., 'bitcoin')
-        "symbol",  # Ticker (e.g., 'btc')
-        "name",  # Display name
-        "current_price",  # The 'Close' price for that timestamp
-        "market_cap",  # Total valuation
-        "total_volume",  # Trading activity
-        "market_cap_rank",  # Position in the market
-        "price_change_percentage_24h",  # Volatility metric
+        "id",
+        "symbol",
+        "name",
+        "current_price",
+        "market_cap",
+        "total_volume",
+        "market_cap_rank",
+        "price_change_percentage_24h",
         "high_24h",
         "low_24h",
-        "captured_at",  # Your record timestamp
         "last_updated",
     ]
-    # Apply the filter to your DataFrame
-    df = df[[col for col in keep_columns if col in df.columns]]
 
+    df = df[[col for col in keep_columns if col in df.columns]].copy()
     df["captured_at"] = pd.Timestamp.now()
 
     return df
 
 
 # --- EXECUTION FLOW ---
+if __name__ == "__main__":
+    df_clean = get_crypto_data(pages=8)
+    print(f"Total usable coins: {len(df_clean)}")
 
-# A. Get the data
-df_clean = get_coins(pages=8)
-print(f"Total usable coins: {len(df_clean)}")
-
-# B. Upload to Database (Outside the function)
-if not df_clean.empty:
-    try:
-        # Create the engine here
-        engine = create_engine(DB_URL)
-
-        # Upload
-        df_clean.to_sql("crypto_prices", engine, if_exists="append", index=False)
-        print("✅ Data successfully uploaded to SUPABASE!")
-
-    except Exception as e:
-        print(f"❌ Database error: {e}")
+    if not df_clean.empty:
+        try:
+            # --- C. Fast Database Upload ---
+            engine = create_engine(DB_URL)
+            df_clean.to_sql(
+                "crypto_prices",
+                engine,
+                if_exists="append",
+                index=False,
+                chunksize=1000,
+                method="multi",  # Vital for speed
+            )
+            print("✅ Data successfully uploaded to SUPABASE!")
+        except Exception as e:
+            print(f"❌ Database error: {e}")
