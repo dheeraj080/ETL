@@ -4,33 +4,51 @@ import pandas as pd
 from sqlalchemy import create_engine
 from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
-from urllib3.util import Retry
-from concurrent.futures import ThreadPoolExecutor
+from urllib3.util.retry import Retry
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 
-# 1. Load configuration
+# ---------------- CONFIG ---------------- #
 load_dotenv()
+
 API_URL = "https://api.coingecko.com/api/v3/coins/markets"
 API_KEY = os.getenv("GECKO_KEY")
 DB_URL = os.getenv("SUPABASE_URL")
 
+PAGES = 8
+MAX_WORKERS = 5          # safer for CoinGecko
+TIMEOUT = 10             # seconds
 
-def get_robust_session():
-    session = requests.Session()
-    retry_strategy = Retry(
+KEEP_COLUMNS = [
+    "id",
+    "symbol",
+    "name",
+    "current_price",
+    "market_cap",
+    "total_volume",
+    "market_cap_rank",
+    "price_change_percentage_24h",
+    "high_24h",
+    "low_24h",
+    "last_updated",
+]
+
+# ---------------- HTTP SESSION ---------------- #
+def create_session():
+    retry = Retry(
         total=5,
-        backoff_factor=2,
+        backoff_factor=1.5,
         status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET"],
     )
-    adapter = HTTPAdapter(max_retries=retry_strategy)
+    adapter = HTTPAdapter(max_retries=retry, pool_maxsize=MAX_WORKERS)
+    session = requests.Session()
     session.mount("https://", adapter)
     return session
 
 
-session = get_robust_session()
-
-
-def fetch_page(page):
-    """Worker function for threading."""
+def fetch_page(page: int) -> list[dict]:
+    session = create_session()  # one session per thread
     params = {
         "vs_currency": "usd",
         "order": "market_cap_desc",
@@ -39,69 +57,71 @@ def fetch_page(page):
         "sparkline": False,
     }
     headers = {"x-cg-demo-api-key": API_KEY}
+
     try:
-        response = session.get(API_URL, headers=headers, params=params)
-        if response.status_code == 200:
-            print(f"Fetched page {page}...")
-            return response.json()
+        r = session.get(API_URL, headers=headers, params=params, timeout=TIMEOUT)
+        r.raise_for_status()
+        print(f"✅ Page {page} fetched")
+        return r.json()
     except Exception as e:
-        print(f"Error fetching page {page}: {e}")
-    return []
+        print(f"❌ Page {page} failed: {e}")
+        return []
 
 
-def get_crypto_data(pages=8):
-    # --- A. Parallel Fetching ---
-    # Using threads allows us to wait for multiple network responses at once
-    with ThreadPoolExecutor(max_workers=pages) as executor:
-        results = list(executor.map(fetch_page, range(1, pages + 1)))
+# ---------------- MAIN LOGIC ---------------- #
+def get_crypto_data(pages: int = PAGES) -> pd.DataFrame:
+    all_rows = []
 
-    all_data = [item for sublist in results for item in sublist]
-    df = pd.DataFrame(all_data)
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = [executor.submit(fetch_page, p) for p in range(1, pages + 1)]
+        for future in as_completed(futures):
+            all_rows.extend(future.result())
 
-    if df.empty:
-        return df
+    if not all_rows:
+        return pd.DataFrame()
 
-    # --- B. Cleaning & Processing ---
+    df = pd.DataFrame(all_rows)
+
+    # Fast column selection
+    df = df[[c for c in KEEP_COLUMNS if c in df.columns]]
+
+    # Filters
     df = df.dropna(subset=["market_cap_rank"])
-    df = df[df["total_volume"] > 50000]
+    df = df[df["total_volume"] > 50_000]
 
-    keep_columns = [
-        "id",
-        "symbol",
-        "name",
-        "current_price",
-        "market_cap",
-        "total_volume",
-        "market_cap_rank",
-        "price_change_percentage_24h",
-        "high_24h",
-        "low_24h",
-        "last_updated",
-    ]
+    df["captured_at"] = pd.Timestamp.utcnow()
 
-    df = df[[col for col in keep_columns if col in df.columns]].copy()
-    df["captured_at"] = pd.Timestamp.now()
-
-    return df
+    return df.reset_index(drop=True)
 
 
-# --- EXECUTION FLOW ---
+# ---------------- EXECUTION ---------------- #
 if __name__ == "__main__":
-    df_clean = get_crypto_data(pages=8)
-    print(f"Total usable coins: {len(df_clean)}")
+    start_time = time.perf_counter()
+    
+    df = get_crypto_data()
+    print(f"📊 Usable coins: {len(df)}")
 
-    if not df_clean.empty:
+    if not df.empty:
         try:
-            # --- C. Fast Database Upload ---
-            engine = create_engine(DB_URL)
-            df_clean.to_sql(
+            engine = create_engine(
+                DB_URL,
+                pool_pre_ping=True,
+                pool_size=5,
+                max_overflow=10,
+            )
+
+            df.to_sql(
                 "crypto_prices",
                 engine,
                 if_exists="append",
                 index=False,
-                chunksize=1000,
-                method="multi",  # Vital for speed
+                chunksize=2000,
+                method="multi",
             )
-            print("✅ Data successfully uploaded to SUPABASE!")
+
+            print("🚀 Uploaded to Supabase successfully")
         except Exception as e:
-            print(f"❌ Database error: {e}")
+            print(f"🔥 Database error: {e}")
+    
+    end_time = time.perf_counter()
+    print(f"⏱️ Total runtime: {end_time - start_time:.2f} seconds")
