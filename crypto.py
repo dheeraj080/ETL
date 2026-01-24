@@ -1,12 +1,10 @@
 import os
-import requests
+import asyncio
+import time
+import aiohttp
 import pandas as pd
 from sqlalchemy import create_engine
 from dotenv import load_dotenv
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import time
 
 # ---------------- CONFIG ---------------- #
 load_dotenv()
@@ -16,8 +14,9 @@ API_KEY = os.getenv("GECKO_KEY")
 DB_URL = os.getenv("SUPABASE_URL")
 
 PAGES = 8
-MAX_WORKERS = 5          # safer for CoinGecko
-TIMEOUT = 10             # seconds
+MAX_CONCURRENT = 5
+VOLUME_CUTOFF = 50_000
+TIMEOUT = aiohttp.ClientTimeout(total=10)
 
 KEEP_COLUMNS = [
     "id",
@@ -33,95 +32,128 @@ KEEP_COLUMNS = [
     "last_updated",
 ]
 
-# ---------------- HTTP SESSION ---------------- #
-def create_session():
-    retry = Retry(
-        total=5,
-        backoff_factor=1.5,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET"],
-    )
-    adapter = HTTPAdapter(max_retries=retry, pool_maxsize=MAX_WORKERS)
-    session = requests.Session()
-    session.mount("https://", adapter)
-    return session
+HEADERS = {"x-cg-demo-api-key": API_KEY}
 
-
-def fetch_page(page: int) -> list[dict]:
-    session = create_session()  # one session per thread
+# ---------------- ASYNC FETCH ---------------- #
+async def fetch_page(session, page: int):
     params = {
         "vs_currency": "usd",
         "order": "market_cap_desc",
         "per_page": 250,
         "page": page,
-        "sparkline": False,
+        "sparkline": "false"
     }
-    headers = {"x-cg-demo-api-key": API_KEY}
 
     try:
-        r = session.get(API_URL, headers=headers, params=params, timeout=TIMEOUT)
-        r.raise_for_status()
-        print(f"✅ Page {page} fetched")
-        return r.json()
+        async with session.get(API_URL, params=params, headers=HEADERS) as r:
+            if r.status != 200:
+                print(f"❌ Page {page} failed ({r.status})")
+                return []
+
+            data = await r.json()
+
+            if data and data[-1]["total_volume"] < VOLUME_CUTOFF:
+                print(f"🛑 Stopping at page {page} (low volume)")
+                return None
+
+            print(f"✅ Page {page} fetched")
+            return data
+        
+    except asyncio.CancelledError:
+        return []
     except Exception as e:
-        print(f"❌ Page {page} failed: {e}")
+        print(f"❌ Page {page} error: {e}")
         return []
 
 
+async def fetch_all_pages():
+    connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT)
+    async with aiohttp.ClientSession(
+        headers=HEADERS,
+        timeout=TIMEOUT,
+        connector=connector,
+    ) as session:
+        # Fetch all 8 pages at once
+        tasks = [fetch_page(session, p) for p in range(1, PAGES + 1)]
+        
+        # gather returns results in the exact order of the tasks list
+        pages_data = await asyncio.gather(*tasks)
+        
+        results = []
+        for data in pages_data:
+            if data is None or not data: # Handle the stop signal or empty responses
+                break
+            results.extend(data)
+            
+        return results
+
+
 # ---------------- MAIN LOGIC ---------------- #
-def get_crypto_data(pages: int = PAGES) -> pd.DataFrame:
-    all_rows = []
+def get_crypto_data():
+    # 1. Fetch data (Recommendation: Use asyncio.gather in fetch_all_pages 
+    # to ensure results come back in page order)
+    rows = asyncio.run(fetch_all_pages())
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = [executor.submit(fetch_page, p) for p in range(1, pages + 1)]
-        for future in as_completed(futures):
-            all_rows.extend(future.result())
-
-    if not all_rows:
+    if not rows:
         return pd.DataFrame()
 
-    df = pd.DataFrame(all_rows)
+    # 2. Convert to DataFrame and select columns
+    df = pd.DataFrame(rows)
+    
+    # Ensure all KEEP_COLUMNS exist before selecting
+    existing_cols = [c for c in KEEP_COLUMNS if c in df.columns]
+    df = df[existing_cols]
 
-    # Fast column selection
-    df = df[[c for c in KEEP_COLUMNS if c in df.columns]]
-
-    # Filters
+    # 3. Fast Filtering
+    # Drop coins without a rank
     df = df.dropna(subset=["market_cap_rank"])
-    df = df[df["total_volume"] > 50_000]
+    
+    # Filter by Volume
+    df = df[df["total_volume"] > VOLUME_CUTOFF]
+    
+    # --- NEW: Filter by Volatility ---
+    # Removes coins with practically zero price movement (< 0.05%)
+    df = df[df["price_change_percentage_24h"].abs() > 0.05]
 
+    # 4. Add metadata
     df["captured_at"] = pd.Timestamp.utcnow()
-
-    return df.reset_index(drop=True)
+    
+    # 5. Final Sort (Crucial for Async results)
+    # Since async fetches pages out of order, we re-sort by market cap
+    df = df.sort_values("market_cap_rank").reset_index(drop=True)
+    
+    # Convert API string to actual datetime objects
+    df["last_updated"] = pd.to_datetime(df["last_updated"])
+    
+    return df
 
 
 # ---------------- EXECUTION ---------------- #
 if __name__ == "__main__":
-    start_time = time.perf_counter()
-    
+    start = time.perf_counter()
+
     df = get_crypto_data()
     print(f"📊 Usable coins: {len(df)}")
 
     if not df.empty:
-        try:
-            engine = create_engine(
-                DB_URL,
-                pool_pre_ping=True,
-                pool_size=5,
-                max_overflow=10,
-            )
+        engine = create_engine(
+            DB_URL,
+            pool_size=5,
+            max_overflow=10,
+            pool_pre_ping=True,
+        )
 
-            df.to_sql(
-                "crypto_prices",
-                engine,
-                if_exists="append",
-                index=False,
-                chunksize=2000,
-                method="multi",
-            )
+        t_db_start = time.perf_counter()
 
-            print("🚀 Uploaded to Supabase successfully")
-        except Exception as e:
-            print(f"🔥 Database error: {e}")
-    
-    end_time = time.perf_counter()
-    print(f"⏱️ Total runtime: {end_time - start_time:.2f} seconds")
+        df.to_sql(
+            "crypto_prices",
+            engine,
+            if_exists="append",
+            index=False,
+            chunksize=5000,
+            method="multi",
+        )
+
+        print(f"🗄️ DB write time: {time.perf_counter() - t_db_start:.2f}s")
+
+    print(f"⏱️ Total runtime: {time.perf_counter() - start:.2f}s")
