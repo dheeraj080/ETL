@@ -10,8 +10,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 API_URL = "https://api.coingecko.com/api/v3/coins/markets"
-API_KEY = os.getenv("GECKO_KEY").strip()
-DB_URL = os.getenv("SUPABASE_URL").strip()
+API_KEY = os.getenv("GECKO_KEY", "").strip()
+DB_URL = os.getenv("SUPABASE_URL", "").strip()
 
 # Optional: Safety check to make sure the key isn't empty after stripping
 if not API_KEY:
