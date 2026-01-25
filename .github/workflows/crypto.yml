@@ -6,7 +6,7 @@ concurrency:
 
 on:
   schedule:
-    - cron: '0 * * * *' # Runs every hour
+    - cron: '*/10 * * * *' # Runs every 10 min
   workflow_dispatch:      # Allows manual trigger
 
 jobs:
